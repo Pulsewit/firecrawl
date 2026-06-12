@@ -5,6 +5,8 @@ import UserAgent from 'user-agents';
 import { getError } from './helpers/get_error';
 import { lookup } from 'dns/promises';
 import IPAddr from 'ipaddr.js';
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
 dotenv.config();
 
@@ -183,8 +185,10 @@ interface UrlModel {
 let browser: Browser;
 
 const initializeBrowser = async () => {
-  browser = await chromium.launch({
+  puppeteerExtra.use(StealthPlugin());
+  browser = await puppeteerExtra.launch({
     headless: true,
+    executablePath: chromium.executablePath(),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -194,7 +198,7 @@ const initializeBrowser = async () => {
       '--no-zygote',
       '--disable-gpu'
     ]
-  });
+  }) as unknown as Browser;
 };
 
 const createContext = async (skipTlsVerification: boolean = false, userAgentOverride?: string): Promise<{ context: BrowserContext; securityState: ContextSecurityState }> => {
