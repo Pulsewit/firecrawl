@@ -730,7 +730,7 @@ async function startServices(command?: string[]): Promise<Services> {
     "api",
     process.argv[2] === "--start-docker"
       ? "node dist/src/index.js"
-      : "pnpm server:production:nobuild",
+      : "pnpm server:production",
     {
       NUQ_REDUCE_NOISE: "true",
       NUQ_POD_NAME: "api",
