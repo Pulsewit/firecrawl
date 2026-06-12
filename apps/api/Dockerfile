@@ -63,7 +63,10 @@ RUN apt-get update && apt-get install -y \
 EXPOSE 8080
 WORKDIR /app
 
-# Copy built application
+# Copy built application and config files
+COPY --from=build /app/package.json ./
+COPY --from=build /app/pnpm-lock.yaml ./
+COPY --from=build /app/pnpm-workspace.yaml ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/native ./native
