@@ -1,37 +1,20 @@
 {
-  "name": "playwright-scraper-api",
+  "name": "playwright-stealth-service",
   "version": "1.0.0",
-  "description": "browser rendering service with playwright",
-  "main": "api.ts",
+  "private": true,
+  "description": "Drop-in replacement for mendableai/playwright-service-ts that uses puppeteer-extra + stealth plugin to defeat basic bot detection (Cloudflare lite, navigator.webdriver, WebGL/Canvas/Plugin fingerprints).",
+  "main": "server.js",
   "scripts": {
-    "start": "node dist/api.js",
-    "build": "tsc",
-    "dev": "tsx api.ts"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "Jeff Pereira",
-  "license": "ISC",
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "express": "^5.2.1",
-    "ipaddr.js": "^2.3.0",
-    "playwright": "^1.58.1",
-    "puppeteer-core": "^23.11.1",
+    "express": "^4.19.2",
+    "cheerio": "^1.0.0",
+    "puppeteer": "^23.6.0",
     "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "user-agents": "^1.1.669"
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
-  "devDependencies": {
-    "@types/express": "^5.0.6",
-    "@types/node": "^22.15.30",
-    "@types/user-agents": "^1.0.4",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
-  },
-  "pnpm": {
-    "overrides": {
-      "path-to-regexp@<8.4.0": ">=8.4.0",
-      "qs@<6.15.2": ">=6.15.2 <7.0.0"
-    }
+  "engines": {
+    "node": ">=20"
   }
 }
