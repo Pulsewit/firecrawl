@@ -33,6 +33,7 @@ const PROXY_USERNAME = process.env.PROXY_USERNAME || "";
 const PROXY_PASSWORD = process.env.PROXY_PASSWORD || "";
 const DEFAULT_TIMEOUT_MS = parseInt(process.env.DEFAULT_TIMEOUT_MS || "30000", 10);
 const INTERNAL_WORKER_TOKEN = process.env.INTERNAL_WORKER_TOKEN || "";
+const ENABLE_GOOGLE_SERP = String(process.env.ENABLE_GOOGLE_SERP || "false").toLowerCase() === "true";
 
 const BLOCKED_RESOURCE_TYPES = new Set([
   "image",
@@ -58,7 +59,7 @@ async function getBrowser() {
   ];
   if (PROXY_SERVER) {
     // Strip scheme — Chrome wants host:port for --proxy-server when auth is provided separately.
-    const proxyArg = PROXY_SERVER.replace(/^https?:\/\//i, "");
+    const proxyArg = PROXY_SERVER.replace(/^https?:\\/\\//i, "");
     args.push(`--proxy-server=${proxyArg}`);
   }
   browserPromise = puppeteer.launch({
@@ -161,7 +162,7 @@ app.post("/scrape", async (req, res) => {
 // Discovers LinkedIn URLs via Bing (DuckDuckGo fallback) and enriches each
 // with the publicly-served OG metadata. Datacenter-friendly: Google is
 // deliberately skipped because it blocks site:linkedin.com from Railway IPs.
-const LINKEDIN_URL_RE = /linkedin\.com\/(?:posts|pulse|feed\/update|company|in)\/[A-Za-z0-9_:%./?=&-]+/i;
+const LINKEDIN_URL_RE = /linkedin\\.com\\/(?:posts|pulse|feed\\/update|company|in)\\/[A-Za-z0-9_:%./?=&-]+/i;
 
 function absoluteLinkedInUrl(href) {
   if (!href) return null;
@@ -169,7 +170,7 @@ function absoluteLinkedInUrl(href) {
     // Bing wraps result links sometimes; normalise.
     let u = href;
     if (u.startsWith("//")) u = `https:${u}`;
-    if (!/^https?:\/\//i.test(u)) return null;
+    if (!/^https?:\\/\\//i.test(u)) return null;
     const parsed = new URL(u);
     // DuckDuckGo wraps results in /l/?uddg=<encoded>
     if (parsed.hostname.endsWith("duckduckgo.com") && parsed.pathname === "/l/") {
@@ -215,6 +216,36 @@ function parseDdg(html) {
     const norm = absoluteLinkedInUrl(href);
     if (norm) urls.push(norm);
   });
+  return urls;
+}
+
+function parseGoogle(html) {
+  const $ = cheerio.load(html);
+  const urls = [];
+  $("a[href*='linkedin.com'], div.g a[href*='linkedin.com']").each((_, el) => {
+    const href = $(el).attr("href");
+    const norm = absoluteLinkedInUrl(href);
+    if (norm) urls.push(norm);
+  });
+  return urls;
+}
+
+/**
+ * Regex-based fallback parser: scans raw HTML for LinkedIn URLs
+ * that the CSS selectors might miss (news cards, "people also search", deep results, etc.)
+ */
+function parseLinkedInUrlsRegex(html) {
+  const urls = [];
+  // Match LinkedIn URLs in href attributes and text
+  const linkedinRegex = /(?:href=["']|>)([^"'<>]*linkedin\.com\/(?:posts|pulse|feed\/update|company|in)\/[A-Za-z0-9_:%./?=&-]+)/gi;
+  let match;
+  while ((match = linkedinRegex.exec(html)) !== null) {
+    const href = match[1];
+    const norm = absoluteLinkedInUrl(href);
+    if (norm && !urls.includes(norm)) {
+      urls.push(norm);
+    }
+  }
   return urls;
 }
 
@@ -306,34 +337,84 @@ app.post("/linkedin/search", async (req, res) => {
     const q = `site:linkedin.com "${keyword}"`;
     const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=en${country ? `&cc=${country}` : ""}&count=30`;
     const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+    const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}&num=30`;
 
     const browser = await getBrowser();
 
     // SERP — Bing first.
     let serpEngine = "bing";
     let urls = [];
+    let bingHtml = "";
     {
       const ctx = await browser.createBrowserContext();
       const page = await ctx.newPage();
       try {
-        const html = await fetchSerpHtml(page, bingUrl);
-        urls = dedupe(parseBing(html));
-      } catch (_) { /* ignore */ }
-      finally { await page.close().catch(() => {}); await ctx.close().catch(() => {}); }
+        bingHtml = await fetchSerpHtml(page, bingUrl);
+        const bingUrls = parseBing(bingHtml);
+        urls = dedupe(bingUrls);
+        
+        // Log Bing diagnostics
+        const bingFirst200 = bingHtml.slice(0, 200);
+        const bingRegexUrls = parseLinkedInUrlsRegex(bingHtml);
+        console.log(`[SERP-BING] html_length=${bingHtml.length} first_200_chars="${bingFirst200.replace(/\n/g, " ")}" selector_urls=${bingUrls.length} regex_urls=${bingRegexUrls.length}`);
+      } catch (e) {
+        console.log(`[SERP-BING] error=${e && e.message ? e.message : String(e)}`);
+      } finally {
+        await page.close().catch(() => {});
+        await ctx.close().catch(() => {});
+      }
     }
+
+    // Fallback to DuckDuckGo if Bing returned < 5 results
     if (urls.length < 5) {
       const ctx = await browser.createBrowserContext();
       const page = await ctx.newPage();
       try {
-        const html = await fetchSerpHtml(page, ddgUrl);
-        const ddgUrls = parseDdg(html);
-        urls = dedupe([...urls, ...ddgUrls]);
-        if (urls.length > 0 && urls.every((u) => !parseBing("").includes(u))) {
-          // mark ddg if bing returned nothing
-          if (parseBing("").length === 0 && urls.length > 0) serpEngine = "bing+ddg";
+        const ddgHtml = await fetchSerpHtml(page, ddgUrl);
+        const ddgUrls = parseDdg(ddgHtml);
+        const ddgRegexUrls = parseLinkedInUrlsRegex(ddgHtml);
+        
+        // Log DDG diagnostics
+        const ddgFirst200 = ddgHtml.slice(0, 200);
+        console.log(`[SERP-DDG] html_length=${ddgHtml.length} first_200_chars="${ddgFirst200.replace(/\n/g, " ")}" selector_urls=${ddgUrls.length} regex_urls=${ddgRegexUrls.length}`);
+        
+        // Combine DDG results with regex fallback
+        urls = dedupe([...urls, ...ddgUrls, ...ddgRegexUrls]);
+        if (urls.length > 0 && parseBing(bingHtml).length === 0) {
+          serpEngine = "ddg";
         }
-      } catch (_) { /* ignore */ }
-      finally { await page.close().catch(() => {}); await ctx.close().catch(() => {}); }
+      } catch (e) {
+        console.log(`[SERP-DDG] error=${e && e.message ? e.message : String(e)}`);
+      } finally {
+        await page.close().catch(() => {});
+        await ctx.close().catch(() => {});
+      }
+    }
+
+    // Google fallback if enabled and still < 5 results
+    if (ENABLE_GOOGLE_SERP && urls.length < 5) {
+      const ctx = await browser.createBrowserContext();
+      const page = await ctx.newPage();
+      try {
+        const googleHtml = await fetchSerpHtml(page, googleUrl);
+        const googleUrls = parseGoogle(googleHtml);
+        const googleRegexUrls = parseLinkedInUrlsRegex(googleHtml);
+        
+        // Log Google diagnostics
+        const googleFirst200 = googleHtml.slice(0, 200);
+        console.log(`[SERP-GOOGLE] html_length=${googleHtml.length} first_200_chars="${googleFirst200.replace(/\n/g, " ")}" selector_urls=${googleUrls.length} regex_urls=${googleRegexUrls.length}`);
+        
+        // Combine Google results with regex fallback
+        urls = dedupe([...urls, ...googleUrls, ...googleRegexUrls]);
+        if (urls.length > 0 && parseBing(bingHtml).length === 0) {
+          serpEngine = "google";
+        }
+      } catch (e) {
+        console.log(`[SERP-GOOGLE] error=${e && e.message ? e.message : String(e)}`);
+      } finally {
+        await page.close().catch(() => {});
+        await ctx.close().catch(() => {});
+      }
     }
 
     urls = urls.slice(0, limit);
@@ -368,7 +449,7 @@ app.post("/linkedin/search", async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   // eslint-disable-next-line no-console
   console.log(
-    `[playwright-stealth] listening on :${PORT} (BLOCK_MEDIA=${BLOCK_MEDIA}, PROXY=${PROXY_SERVER ? "on" : "off"})`,
+    `[playwright-stealth] listening on :${PORT} (BLOCK_MEDIA=${BLOCK_MEDIA}, PROXY=${PROXY_SERVER ? "on" : "off"}, ENABLE_GOOGLE_SERP=${ENABLE_GOOGLE_SERP})`,
   );
 });
 
@@ -382,3 +463,4 @@ async function shutdown() {
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+
