@@ -186,5 +186,3 @@ export async function linkedinSearchController(
     });
   }
 }
-
-}
