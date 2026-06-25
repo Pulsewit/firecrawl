@@ -19,6 +19,7 @@ import { extractStatusController } from "../controllers/v1/extract-status";
 import { creditUsageController } from "../controllers/v1/credit-usage";
 import { searchController } from "../controllers/v1/search";
 import { x402SearchController } from "../controllers/v1/x402-search";
+import { linkedinSearchController } from "../controllers/v1/linkedin-search";
 import { crawlErrorsController } from "../controllers/v1/crawl-errors";
 import { generateLLMsTextController } from "../controllers/v1/generate-llmstxt";
 import { generateLLMsTextStatusController } from "../controllers/v1/generate-llmstxt-status";
@@ -157,6 +158,13 @@ v1Router.post(
   countryCheck,
   checkCreditsMiddleware(undefined, SEARCH_CREDITS_FEATURE_ID),
   wrap(searchController),
+);
+
+v1Router.post(
+  "/linkedin/search",
+  authMiddleware(RateLimiterMode.Search),
+  countryCheck,
+  wrap(linkedinSearchController),
 );
 
 v1Router.post(
