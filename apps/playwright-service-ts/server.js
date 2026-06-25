@@ -35,6 +35,13 @@ const DEFAULT_TIMEOUT_MS = parseInt(process.env.DEFAULT_TIMEOUT_MS || "30000", 1
 const INTERNAL_WORKER_TOKEN = process.env.INTERNAL_WORKER_TOKEN || "";
 const ENABLE_GOOGLE_SERP = String(process.env.ENABLE_GOOGLE_SERP || "false").toLowerCase() === "true";
 
+// Webshare proxy rotation for SERP fetching
+const WEBSHARE_USERNAME = process.env.WEBSHARE_USERNAME || "yezgjmxe";
+const WEBSHARE_PASSWORD = process.env.WEBSHARE_PASSWORD || "5my9gmltj4r5";
+const WEBSHARE_HOST = process.env.WEBSHARE_HOST || "p.webshare.io";
+const WEBSHARE_PORT = parseInt(process.env.WEBSHARE_PORT || "80", 10);
+const ENABLE_SERP_PROXY = String(process.env.ENABLE_SERP_PROXY || "true").toLowerCase() === "true";
+
 const BLOCKED_RESOURCE_TYPES = new Set([
   "image",
   "media",
@@ -59,7 +66,7 @@ async function getBrowser() {
   ];
   if (PROXY_SERVER) {
     // Strip scheme — Chrome wants host:port for --proxy-server when auth is provided separately.
-    const proxyArg = PROXY_SERVER.replace(/^https?:\\/\\//i, "");
+    const proxyArg = PROXY_SERVER.replace(/^https?:\/\//, "");
     args.push(`--proxy-server=${proxyArg}`);
   }
   browserPromise = puppeteer.launch({
@@ -160,9 +167,9 @@ app.post("/scrape", async (req, res) => {
 // POST /linkedin/search
 // Body: { keyword, limit?, country?, sinceDays?, internalToken }
 // Discovers LinkedIn URLs via Bing (DuckDuckGo fallback) and enriches each
-// with the publicly-served OG metadata. Datacenter-friendly: Google is
-// deliberately skipped because it blocks site:linkedin.com from Railway IPs.
-const LINKEDIN_URL_RE = /linkedin\\.com\\/(?:posts|pulse|feed\\/update|company|in)\\/[A-Za-z0-9_:%./?=&-]+/i;
+// with the publicly-served OG metadata. Uses Webshare proxy rotation for SERP
+// fetching to avoid IP blocks.
+const LINKEDIN_URL_RE = /linkedin\.com\/(?:posts|pulse|feed\/update|company|in)\/[A-Za-z0-9_:%./?=&-]+/i;
 
 function absoluteLinkedInUrl(href) {
   if (!href) return null;
@@ -170,7 +177,7 @@ function absoluteLinkedInUrl(href) {
     // Bing wraps result links sometimes; normalise.
     let u = href;
     if (u.startsWith("//")) u = `https:${u}`;
-    if (!/^https?:\\/\\//i.test(u)) return null;
+    if (!/^https?:\/\//.test(u)) return null;
     const parsed = new URL(u);
     // DuckDuckGo wraps results in /l/?uddg=<encoded>
     if (parsed.hostname.endsWith("duckduckgo.com") && parsed.pathname === "/l/") {
@@ -186,6 +193,25 @@ function absoluteLinkedInUrl(href) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Create a new browser context with Webshare proxy for SERP fetching.
+ * Each call gets a fresh proxy IP to avoid rate limiting.
+ */
+async function createSerpContext(browser) {
+  const context = await browser.createBrowserContext();
+  const page = await context.newPage();
+  
+  if (ENABLE_SERP_PROXY) {
+    // Authenticate with Webshare proxy for this context
+    await page.authenticate({
+      username: WEBSHARE_USERNAME,
+      password: WEBSHARE_PASSWORD,
+    });
+  }
+  
+  return { context, page };
 }
 
 async function fetchSerpHtml(page, url) {
@@ -341,13 +367,12 @@ app.post("/linkedin/search", async (req, res) => {
 
     const browser = await getBrowser();
 
-    // SERP — Bing first.
+    // SERP — Bing first with proxy rotation.
     let serpEngine = "bing";
     let urls = [];
     let bingHtml = "";
     {
-      const ctx = await browser.createBrowserContext();
-      const page = await ctx.newPage();
+      const { context, page } = await createSerpContext(browser);
       try {
         bingHtml = await fetchSerpHtml(page, bingUrl);
         const bingUrls = parseBing(bingHtml);
@@ -356,19 +381,18 @@ app.post("/linkedin/search", async (req, res) => {
         // Log Bing diagnostics
         const bingFirst200 = bingHtml.slice(0, 200);
         const bingRegexUrls = parseLinkedInUrlsRegex(bingHtml);
-        console.log(`[SERP-BING] html_length=${bingHtml.length} first_200_chars="${bingFirst200.replace(/\n/g, " ")}" selector_urls=${bingUrls.length} regex_urls=${bingRegexUrls.length}`);
+        console.log(`[SERP-BING] html_length=${bingHtml.length} first_200_chars="${bingFirst200.replace(/\n/g, " ")}" selector_urls=${bingUrls.length} regex_urls=${bingRegexUrls.length} proxy=${ENABLE_SERP_PROXY ? "webshare" : "none"}`);
       } catch (e) {
         console.log(`[SERP-BING] error=${e && e.message ? e.message : String(e)}`);
       } finally {
         await page.close().catch(() => {});
-        await ctx.close().catch(() => {});
+        await context.close().catch(() => {});
       }
     }
 
-    // Fallback to DuckDuckGo if Bing returned < 5 results
+    // Fallback to DuckDuckGo if Bing returned < 5 results (fresh proxy IP)
     if (urls.length < 5) {
-      const ctx = await browser.createBrowserContext();
-      const page = await ctx.newPage();
+      const { context, page } = await createSerpContext(browser);
       try {
         const ddgHtml = await fetchSerpHtml(page, ddgUrl);
         const ddgUrls = parseDdg(ddgHtml);
@@ -376,7 +400,7 @@ app.post("/linkedin/search", async (req, res) => {
         
         // Log DDG diagnostics
         const ddgFirst200 = ddgHtml.slice(0, 200);
-        console.log(`[SERP-DDG] html_length=${ddgHtml.length} first_200_chars="${ddgFirst200.replace(/\n/g, " ")}" selector_urls=${ddgUrls.length} regex_urls=${ddgRegexUrls.length}`);
+        console.log(`[SERP-DDG] html_length=${ddgHtml.length} first_200_chars="${ddgFirst200.replace(/\n/g, " ")}" selector_urls=${ddgUrls.length} regex_urls=${ddgRegexUrls.length} proxy=${ENABLE_SERP_PROXY ? "webshare" : "none"}`);
         
         // Combine DDG results with regex fallback
         urls = dedupe([...urls, ...ddgUrls, ...ddgRegexUrls]);
@@ -387,14 +411,13 @@ app.post("/linkedin/search", async (req, res) => {
         console.log(`[SERP-DDG] error=${e && e.message ? e.message : String(e)}`);
       } finally {
         await page.close().catch(() => {});
-        await ctx.close().catch(() => {});
+        await context.close().catch(() => {});
       }
     }
 
-    // Google fallback if enabled and still < 5 results
+    // Google fallback if enabled and still < 5 results (fresh proxy IP)
     if (ENABLE_GOOGLE_SERP && urls.length < 5) {
-      const ctx = await browser.createBrowserContext();
-      const page = await ctx.newPage();
+      const { context, page } = await createSerpContext(browser);
       try {
         const googleHtml = await fetchSerpHtml(page, googleUrl);
         const googleUrls = parseGoogle(googleHtml);
@@ -402,7 +425,7 @@ app.post("/linkedin/search", async (req, res) => {
         
         // Log Google diagnostics
         const googleFirst200 = googleHtml.slice(0, 200);
-        console.log(`[SERP-GOOGLE] html_length=${googleHtml.length} first_200_chars="${googleFirst200.replace(/\n/g, " ")}" selector_urls=${googleUrls.length} regex_urls=${googleRegexUrls.length}`);
+        console.log(`[SERP-GOOGLE] html_length=${googleHtml.length} first_200_chars="${googleFirst200.replace(/\n/g, " ")}" selector_urls=${googleUrls.length} regex_urls=${googleRegexUrls.length} proxy=${ENABLE_SERP_PROXY ? "webshare" : "none"}`);
         
         // Combine Google results with regex fallback
         urls = dedupe([...urls, ...googleUrls, ...googleRegexUrls]);
@@ -413,7 +436,7 @@ app.post("/linkedin/search", async (req, res) => {
         console.log(`[SERP-GOOGLE] error=${e && e.message ? e.message : String(e)}`);
       } finally {
         await page.close().catch(() => {});
-        await ctx.close().catch(() => {});
+        await context.close().catch(() => {});
       }
     }
 
@@ -449,7 +472,7 @@ app.post("/linkedin/search", async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   // eslint-disable-next-line no-console
   console.log(
-    `[playwright-stealth] listening on :${PORT} (BLOCK_MEDIA=${BLOCK_MEDIA}, PROXY=${PROXY_SERVER ? "on" : "off"}, ENABLE_GOOGLE_SERP=${ENABLE_GOOGLE_SERP})`,
+    `[playwright-stealth] listening on :${PORT} (BLOCK_MEDIA=${BLOCK_MEDIA}, PROXY=${PROXY_SERVER ? "on" : "off"}, ENABLE_GOOGLE_SERP=${ENABLE_GOOGLE_SERP}, SERP_PROXY=${ENABLE_SERP_PROXY ? "webshare" : "none"})`,
   );
 });
 
