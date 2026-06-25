@@ -59,7 +59,7 @@ async function getBrowser() {
   ];
   if (PROXY_SERVER) {
     // Strip scheme — Chrome wants host:port for --proxy-server when auth is provided separately.
-    const proxyArg = PROXY_SERVER.replace(/^https?:\\/\\//i, "");
+    const proxyArg = PROXY_SERVER.replace(/^https?:\/\//, "");
     args.push(`--proxy-server=${proxyArg}`);
   }
   browserPromise = puppeteer.launch({
@@ -162,7 +162,7 @@ app.post("/scrape", async (req, res) => {
 // Discovers LinkedIn URLs via Bing (DuckDuckGo fallback) and enriches each
 // with the publicly-served OG metadata. Datacenter-friendly: Google is
 // deliberately skipped because it blocks site:linkedin.com from Railway IPs.
-const LINKEDIN_URL_RE = /linkedin\\.com\\/(?:posts|pulse|feed\\/update|company|in)\\/[A-Za-z0-9_:%./?=&-]+/i;
+const LINKEDIN_URL_RE = /linkedin\.com\/(?:posts|pulse|feed\/update|company|in)\/[A-Za-z0-9_:%./?=&-]+/i;
 
 function absoluteLinkedInUrl(href) {
   if (!href) return null;
@@ -170,7 +170,7 @@ function absoluteLinkedInUrl(href) {
     // Bing wraps result links sometimes; normalise.
     let u = href;
     if (u.startsWith("//")) u = `https:${u}`;
-    if (!/^https?:\\/\\//i.test(u)) return null;
+    if (!/^https?:\/\//.test(u)) return null;
     const parsed = new URL(u);
     // DuckDuckGo wraps results in /l/?uddg=<encoded>
     if (parsed.hostname.endsWith("duckduckgo.com") && parsed.pathname === "/l/") {
