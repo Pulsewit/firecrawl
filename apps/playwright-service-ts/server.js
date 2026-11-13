@@ -54,7 +54,78 @@ const BLOCKED_RESOURCE_TYPES = new Set([
   "imageset",
 ]);
 
+const MAX_OPERATIONS_BEFORE_RESTART = parseInt(process.env.MAX_OPERATIONS_BEFORE_RESTART || "50", 10);
+const IDLE_TIMEOUT_MS = 300000; // 5 minutes
+
 let browserPromise = null;
+let activeOperations = 0;
+let operationsSinceRestart = 0;
+let idleTimer = null;
+
+function clearIdleTimer() {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
+// Close the current browser (if any). browserPromise is cleared synchronously so
+// a request arriving during the close launches a fresh instance. Never throws.
+async function closeBrowser(reason) {
+  const pending = browserPromise;
+  browserPromise = null;
+  operationsSinceRestart = 0;
+  if (!pending) return;
+  try {
+    const browser = await pending;
+    console.log(`[playwright-stealth] closing browser (${reason})`);
+    await browser.close();
+  } catch (err) {
+    console.error(`[playwright-stealth] browser close failed: ${err && err.message ? err.message : err}`);
+  }
+}
+
+function scheduleIdleShutdown() {
+  clearIdleTimer();
+  if (activeOperations !== 0 || !browserPromise) return;
+  idleTimer = setTimeout(() => {
+    idleTimer = null;
+    if (activeOperations === 0) closeBrowser("idle timeout").catch(() => {});
+  }, IDLE_TIMEOUT_MS);
+  if (idleTimer.unref) idleTimer.unref();
+}
+
+async function acquireBrowser() {
+  activeOperations++;
+  operationsSinceRestart++;
+  clearIdleTimer();
+  try {
+    return await getBrowser();
+  } catch (err) {
+    releaseBrowser();
+    throw err;
+  }
+}
+
+function releaseBrowser() {
+  activeOperations = Math.max(0, activeOperations - 1);
+  if (activeOperations !== 0) return;
+  if (operationsSinceRestart >= MAX_OPERATIONS_BEFORE_RESTART) {
+    closeBrowser("recycle").catch(() => {});
+  } else {
+    scheduleIdleShutdown();
+  }
+}
+
+async function withBrowser(fn) {
+  const browser = await acquireBrowser();
+  try {
+    return await fn(browser);
+  } finally {
+    releaseBrowser();
+  }
+}
+
 async function getBrowser() {
   if (browserPromise) return browserPromise;
   const args = [
@@ -69,19 +140,26 @@ async function getBrowser() {
     const proxyArg = PROXY_SERVER.replace(/^https?:\/\//, "");
     args.push(`--proxy-server=${proxyArg}`);
   }
-  browserPromise = puppeteer.launch({
+  const launching = puppeteer.launch({
     headless: "new",
     args,
     ignoreHTTPSErrors: true,
   });
-  const browser = await browserPromise;
+  browserPromise = launching;
+  let browser;
+  try {
+    browser = await launching;
+  } catch (err) {
+    if (browserPromise === launching) browserPromise = null;
+    throw err;
+  }
   browser.on("disconnected", () => {
-    browserPromise = null;
+    if (browserPromise === launching) browserPromise = null;
   });
   return browser;
 }
 
-async function scrape(req) {
+async function scrape(req, browser) {
   const {
     url,
     wait_after_load = 0,
@@ -93,7 +171,6 @@ async function scrape(req) {
     return { error: "url required" };
   }
 
-  const browser = await getBrowser();
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
 
@@ -147,12 +224,25 @@ async function scrape(req) {
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-app.get("/health", (_req, res) => res.json({ ok: true, stealth: true }));
+app.get("/health", (_req, res) =>
+  res.json({
+    ok: true,
+    stealth: true,
+    memoryRssMb: Math.round(process.memoryUsage().rss / 1048576),
+    activeOperations,
+    operationsSinceRestart,
+    browserRunning: Boolean(browserPromise),
+  }),
+);
 app.get("/", (_req, res) => res.json({ ok: true, service: "playwright-stealth" }));
 
 app.post("/scrape", async (req, res) => {
   try {
-    const result = await scrape(req.body || {});
+    const body = req.body || {};
+    const result =
+      !body.url || typeof body.url !== "string"
+        ? await scrape(body, null)
+        : await withBrowser((browser) => scrape(body, browser));
     res.json(result);
   } catch (err) {
     res.status(500).json({
@@ -346,6 +436,8 @@ async function runPool(items, size, fn) {
 
 app.post("/linkedin/search", async (req, res) => {
   const t0 = Date.now();
+  let browser = null;
+  let acquired = false;
   try {
     const body = req.body || {};
     const token = body.internalToken || req.headers["x-internal-token"] || "";
@@ -365,7 +457,8 @@ app.post("/linkedin/search", async (req, res) => {
     const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
     const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}&num=30`;
 
-    const browser = await getBrowser();
+    browser = await acquireBrowser();
+    acquired = true;
 
     // SERP — Bing first with proxy rotation.
     let serpEngine = "bing";
@@ -466,6 +559,8 @@ app.post("/linkedin/search", async (req, res) => {
       error: err && err.message ? err.message : String(err),
       latency_ms: Date.now() - t0,
     });
+  } finally {
+    if (acquired) releaseBrowser();
   }
 });
 
@@ -477,9 +572,9 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 async function shutdown() {
+  clearIdleTimer();
   try {
-    const browser = browserPromise ? await browserPromise : null;
-    if (browser) await browser.close();
+    await closeBrowser("shutdown");
   } finally {
     process.exit(0);
   }
