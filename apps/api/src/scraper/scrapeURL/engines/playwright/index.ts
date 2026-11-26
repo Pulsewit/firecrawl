@@ -2,6 +2,7 @@ import { z } from "zod";
 import { config } from "../../../../config";
 import { EngineScrapeResult } from "..";
 import { Meta } from "../..";
+import { EngineError } from "../../error";
 import { robustFetch } from "../../lib/fetch";
 import { getInnerJson } from "@mendable/firecrawl-rs";
 
@@ -24,13 +25,24 @@ export async function scrapeURLWithPlaywright(
     logger: meta.logger.child("scrapeURLWithPlaywright/robustFetch"),
     schema: z.object({
       content: z.string(),
-      pageStatusCode: z.number(),
+      pageStatusCode: z.number().nullish(),
       pageError: z.string().nullish(),
       contentType: z.string().optional(),
     }),
     mock: meta.mock,
     abort: meta.abort.asSignal(),
   });
+
+  // The playwright service sends pageStatusCode: null when the page never
+  // loaded (for example a navigation timeout). Report that as the engine
+  // failing, with the service's own error, so the scrape falls back cleanly.
+  const statusCode = response.pageStatusCode;
+  if (statusCode == null) {
+    throw new EngineError(
+      "Playwright could not load the page: " +
+        (response.pageError ?? "no status code returned"),
+    );
+  }
 
   if (response.contentType?.includes("application/json")) {
     response.content = await getInnerJson(response.content);
@@ -39,7 +51,7 @@ export async function scrapeURLWithPlaywright(
   return {
     url: meta.rewrittenUrl ?? meta.url, // TODO: impove redirect following
     html: response.content,
-    statusCode: response.pageStatusCode,
+    statusCode,
     error: response.pageError ?? undefined,
     contentType: response.contentType,
 
