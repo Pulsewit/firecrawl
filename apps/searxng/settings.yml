@@ -1,0 +1,28 @@
+# Firecrawl calls /search?format=json, which SearXNG refuses (403)
+# unless json is listed in search.formats.
+# server.secret_key comes from the SEARXNG_SECRET variable.
+use_default_settings: true
+
+server:
+  limiter: false
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 10.0
+
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: qwant
+    disabled: false
